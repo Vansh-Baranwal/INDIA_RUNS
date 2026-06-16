@@ -146,7 +146,7 @@ def main():
         return
         
     logging.info("Reading parsed candidates")
-    df = pl.read_parquet(input_file)
+    df = pl.read_parquet(input_file, glob=False)
     
     records = df.to_dicts()
     features = []
