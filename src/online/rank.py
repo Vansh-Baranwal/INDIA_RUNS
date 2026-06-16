@@ -16,14 +16,12 @@ def load_text(filepath):
 def main():
     base_dir = Path(__file__).resolve().parent.parent.parent.parent
     artifacts_dir = Path(__file__).resolve().parent.parent.parent / 'artifacts'
-    jd_path = base_dir / 'job_description.docx' # assuming we converted it or read text, for simplicity using markdown if exists
     
-    # Check if a text version exists, else we might have extracted it earlier
     jd_txt_path = base_dir / 'read_docx_output.txt'
     if jd_txt_path.exists():
         jd_text = load_text(jd_txt_path)
     else:
-        jd_text = "Senior AI Engineer Search Ranking Retrieval Embeddings NDCG Vector Databases" # fallback
+        jd_text = "Senior AI Engineer Search Ranking Retrieval Embeddings NDCG Vector Databases"
         
     logging.info("Encoding JD...")
     model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -32,9 +30,9 @@ def main():
     
     indices_set = set()
     retrieval_configs = [
-        ('recent', 1500),
-        ('last_two', 1000),
-        ('full', 500)
+        ('recent', 2500),
+        ('last_two', 1500),
+        ('full', 1000)
     ]
     
     for prefix, k in retrieval_configs:
@@ -42,8 +40,11 @@ def main():
         if idx_path.exists():
             logging.info(f"Searching {idx_path} for top {k}...")
             index = faiss.read_index(str(idx_path))
-            _, I = index.search(jd_emb, k)
-            indices_set.update(I[0].tolist())
+            # Just retrieve max up to index size
+            if index.ntotal < k: k = index.ntotal
+            if k > 0:
+                _, I = index.search(jd_emb, k)
+                indices_set.update(I[0].tolist())
             
     logging.info(f"Union pool size: {len(indices_set)}")
     if not indices_set:
@@ -53,12 +54,9 @@ def main():
     logging.info("Loading parquet features...")
     df = pl.read_parquet(artifacts_dir / 'features.parquet')
     
-    # We assume 'candidate_index' or row number was preserved. 
-    # For this implementation, we will use row numbers as indices to match FAISS
     df = df.with_row_index("faiss_id")
     df_pool = df.filter(pl.col("faiss_id").is_in(list(indices_set)))
     
-    # Load embeddings to compute precise cosine similarity for the pool
     emb_recent = np.load(artifacts_dir / 'embeddings_recent.npy')
     emb_last_two = np.load(artifacts_dir / 'embeddings_last_two.npy')
     emb_full = np.load(artifacts_dir / 'embeddings_full.npy')
@@ -83,12 +81,12 @@ def main():
         Base_Score = (0.55 * pl.col("sim_recent")) + (0.30 * pl.col("sim_last_two")) + (0.15 * pl.col("sim_full"))
     )
     
-    # Final Math
     df_pool = df_pool.with_columns(
         Technical_Multiplier = 1.0 + (
             0.25 * pl.col("feat_search_relevance_evidence") +
-            0.20 * pl.col("feat_retrieval_depth") +
-            0.20 * pl.col("feat_evaluation_rigor") +
+            0.20 * pl.col("feat_ranking_depth") + 
+            0.15 * pl.col("feat_retrieval_depth") +
+            0.15 * pl.col("feat_evaluation_rigor") +
             0.15 * pl.col("feat_builder_score")
         ),
         Trajectory_Multiplier = pl.col("feat_product_exposure") + pl.col("feat_trajectory_transition"),
@@ -108,7 +106,6 @@ def main():
         )
     )
     
-    # Top 100
     df_top = df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(100)
     
     logging.info("Generating reasoning...")
@@ -118,7 +115,6 @@ def main():
         
     df_top = df_top.with_columns(pl.Series("reasoning", reasoning_list))
     
-    # Submission Format
     df_sub = df_top.select([
         pl.col("candidate_id"),
         pl.arange(1, 101).alias("rank"),
@@ -126,14 +122,19 @@ def main():
         pl.col("reasoning")
     ])
     
-    sub_path = base_dir / 'submission.csv'
+    sub_path = artifacts_dir.parent / 'submission.csv'
     df_sub.write_csv(sub_path)
     logging.info(f"Saved submission to {sub_path}")
     
-    # Debug Parquet
-    debug_path = artifacts_dir / 'candidate_debug.parquet'
+    debug_path = artifacts_dir / 'debug_top200.parquet'
     df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(200).write_parquet(debug_path)
     logging.info(f"Saved debug output to {debug_path}")
+
+    # Export Top 20 and Top 100 CSVs for the audit
+    top20_path = artifacts_dir.parent / 'top20.csv'
+    top100_path = artifacts_dir.parent / 'top100.csv'
+    df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(20).write_csv(top20_path)
+    df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(100).write_csv(top100_path)
 
 if __name__ == "__main__":
     main()
