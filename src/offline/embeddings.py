@@ -20,7 +20,7 @@ def main():
         return
         
     logging.info("Loading candidates...")
-    df = pl.read_parquet(input_file)
+    df = pl.read_parquet(input_file, glob=False)
     
     # Ensure columns exist
     if not all(col in df.columns for col in ['recent_role_text', 'last_two_roles_text', 'full_profile_text']):

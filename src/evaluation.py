@@ -14,7 +14,7 @@ def evaluate_pipeline(artifacts_dir: Path):
         return
         
     logging.info("--- 1. Loading Features ---")
-    df = pl.read_parquet(features_path)
+    df = pl.read_parquet(features_path, glob=False)
     logging.info(f"Loaded {len(df)} candidates.")
     
     logging.info("\n--- 2. Checking for NaNs ---")
@@ -50,7 +50,7 @@ def evaluate_pipeline(artifacts_dir: Path):
         
     logging.info("\n--- 6. Submission.csv Validity ---")
     if submission_path.exists():
-        sub_df = pl.read_csv(submission_path)
+        sub_df = pl.read_csv(submission_path, glob=False)
         logging.info(f"Loaded submission.csv with {len(sub_df)} rows.")
         
         if len(sub_df) != 100:

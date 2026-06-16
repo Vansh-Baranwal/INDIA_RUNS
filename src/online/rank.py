@@ -52,7 +52,7 @@ def main():
         return
         
     logging.info("Loading parquet features...")
-    df = pl.read_parquet(artifacts_dir / 'features.parquet')
+    df = pl.read_parquet(artifacts_dir / 'features.parquet', glob=False)
     
     df = df.with_row_index("faiss_id")
     df_pool = df.filter(pl.col("faiss_id").is_in(list(indices_set)))
