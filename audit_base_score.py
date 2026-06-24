@@ -1,0 +1,180 @@
+import polars as pl
+import numpy as np
+import faiss
+import json
+from pathlib import Path
+from sentence_transformers import SentenceTransformer
+from scipy.stats import pearsonr
+
+artifacts_dir = Path(r"d:\Some_stuffs\India Runs\[PUB] India_runs_data_and_ai_challenge\[PUB] India_runs_data_and_ai_challenge\India_runs_data_and_ai_challenge\INDIA_RUNS\artifacts")
+
+# Read pool and features
+jd_text = "Senior AI Engineer Search Ranking Retrieval Embeddings NDCG Vector Databases"
+model = SentenceTransformer('all-MiniLM-L6-v2')
+jd_emb = model.encode([jd_text])
+faiss.normalize_L2(jd_emb)
+
+indices_set = set()
+for prefix, k in [('recent', 2500), ('last_two', 1500), ('full', 1000)]:
+    idx_path = artifacts_dir / f'candidates_{prefix}.faiss'
+    index = faiss.read_index(str(idx_path))
+    actual_k = min(k, index.ntotal)
+    if actual_k > 0:
+        _, I = index.search(jd_emb, actual_k)
+        indices_set.update(I[0].tolist())
+
+df_feat = pl.read_parquet(artifacts_dir / 'features.parquet', glob=False).with_row_index("faiss_id")
+df_pool = df_feat.filter(pl.col("faiss_id").is_in(list(indices_set)))
+
+emb_recent = np.load(artifacts_dir / 'embeddings_recent.npy')
+emb_last_two = np.load(artifacts_dir / 'embeddings_last_two.npy')
+emb_full = np.load(artifacts_dir / 'embeddings_full.npy')
+faiss.normalize_L2(emb_recent)
+faiss.normalize_L2(emb_last_two)
+faiss.normalize_L2(emb_full)
+
+pool_ids = df_pool['faiss_id'].to_list()
+df_pool = df_pool.with_columns([
+    pl.Series("sim_recent", (emb_recent[pool_ids] @ jd_emb[0]).tolist()),
+    pl.Series("sim_last_two", (emb_last_two[pool_ids] @ jd_emb[0]).tolist()),
+    pl.Series("sim_full", (emb_full[pool_ids] @ jd_emb[0]).tolist()),
+])
+
+df_parsed = pl.read_parquet(artifacts_dir / 'parsed_candidates.parquet', glob=False)
+df_pool = df_pool.join(df_parsed, on="candidate_id", how="left")
+if 'years_of_experience_right' in df_pool.columns:
+    df_pool = df_pool.drop('years_of_experience_right')
+
+df_pool = df_pool.with_columns([
+    (0.55*pl.col("sim_recent") + 0.30*pl.col("sim_last_two") + 0.15*pl.col("sim_full")).alias("Base_Score"),
+    ((0.4 * pl.col("feat_builder_score") + 0.3 * pl.col("feat_ranking_depth") + 0.3 * pl.col("feat_retrieval_depth")).clip(0.0, 1.0)).alias("feat_search_builder"),
+    (1.0 + (pl.col("feat_availability_score") + pl.col("feat_saved_boost") + pl.col("feat_search_appearance_boost") - 1.0)*0.25).alias("Behavioral_Multiplier"),
+    (pl.col("feat_wrapper_ai_only") * pl.col("feat_architect_no_coding")).alias("Persona_Penalty")
+])
+
+# Calculate base score percentile in entire pool
+df_pool = df_pool.with_columns(
+    (pl.col("Base_Score").rank() / len(df_pool) * 100.0).alias("Base_Score_Percentile")
+)
+
+def compute_raw_contradiction(row):
+    score = 0.0
+    yoe = row.get('years_of_experience', 0)
+    if yoe is None: yoe = 0
+    grad_year = row.get('grad_year', 0)
+    if grad_year is None: grad_year = 0
+            
+    if grad_year > 0:
+        if (2026 - grad_year) < yoe - 2:
+            score += 5.0
+            
+    sal_min = row.get('expected_salary_min', 0)
+    if sal_min is None: sal_min = 0
+    if yoe <= 2 and sal_min > 40:
+        score += 5.0
+        
+    views = row.get('profile_views_received_30d', 0)
+    if views is None: views = 0
+    response_rate = row.get('recruiter_response_rate', 0.0)
+    if response_rate is None: response_rate = 0.0
+    if response_rate == 1.0 and views == 0:
+        score += 2.0
+        
+    try:
+        skills = json.loads(row.get('skills_json', '[]'))
+        for s in skills:
+            if s.get('proficiency') == 'expert' and s.get('duration_months', 0) == 0:
+                score += 1.0
+    except:
+        pass
+
+    return score
+
+df_pool = df_pool.with_columns(pl.Series("raw_contra", [compute_raw_contradiction(r) for r in df_pool.iter_rows(named=True)]))
+
+df_pool = df_pool.with_columns(
+    pl.when(
+        (pl.col("feat_search_builder") >= 0.80) | 
+        ((pl.col("feat_ranking_depth") >= 0.80) & (pl.col("feat_retrieval_depth") >= 0.80))
+    )
+    .then(pl.col("raw_contra") * 0.25)
+    .otherwise(pl.col("raw_contra"))
+    .alias("exempt_contra")
+)
+
+df_pool = df_pool.with_columns([
+    ((-0.10 * pl.col("exempt_contra")).exp()).alias("Honeypot_Decay"),
+    (0.50 + 0.20 * pl.col("feat_builder_score") + 0.20 * pl.col("feat_ranking_depth") + 0.10 * pl.col("feat_retrieval_depth")).alias("Trajectory_Multiplier"),
+    (1.0 + (0.25*pl.col("feat_search_relevance_evidence") + 0.20*pl.col("feat_ranking_depth") + 0.15*pl.col("feat_retrieval_depth") + 0.15*pl.col("feat_evaluation_rigor") + 0.35*pl.col("feat_builder_score"))).alias("Technical_Multiplier")
+])
+
+df_pool = df_pool.with_columns(
+    (pl.col("Base_Score") * pl.col("Technical_Multiplier") * pl.col("feat_verified_search_skill") * pl.col("Trajectory_Multiplier") * pl.col("Behavioral_Multiplier") * pl.col("Persona_Penalty") * pl.col("Honeypot_Decay")).alias("Final_Score")
+)
+df_ranked = df_pool.sort(["Final_Score","candidate_id"], descending=[True,False]).with_row_index("rank")
+
+# Correlation (in Top 100 to have meaningful variance, but user asked for Top 20 so we'll do both or just Top 20)
+top20 = df_ranked.head(20)
+t20_median_base = top20['Base_Score'].median()
+
+print("\n" + "="*120)
+print("BASE SCORE FORENSIC AUDIT (Top 20)")
+print("="*120)
+
+for row in top20.iter_rows(named=True):
+    r = row['rank'] + 1
+    cid = row['candidate_id']
+    pct = row['Base_Score_Percentile']
+    base = row['Base_Score']
+    sb = row['feat_search_builder']
+    ret = row['feat_retrieval_depth']
+    rd = row['feat_ranking_depth']
+    
+    print(f"Rank {r:>2} | {cid:<15} | BaseScore Pct: {pct:5.1f}% (Val: {base:.3f}) | SearchBldr: {sb:.2f} | RetDepth: {ret:.2f} | RnkDepth: {rd:.2f}")
+
+# Correlations
+print("\n" + "="*80)
+print("CORRELATIONS (Top 100)")
+print("="*80)
+t100 = df_ranked.head(100)
+# Final rank is just 1..100. Lower is better. 
+ranks = t100['rank'].to_numpy() + 1
+base_corr, _ = pearsonr(t100['Base_Score'].to_numpy(), ranks)
+sb_corr, _ = pearsonr(t100['feat_search_builder'].to_numpy(), ranks)
+ret_corr, _ = pearsonr(t100['feat_retrieval_depth'].to_numpy(), ranks)
+rd_corr, _ = pearsonr(t100['feat_ranking_depth'].to_numpy(), ranks)
+
+# Note: Negative correlation means higher feature value = lower numerical rank (which means BETTER rank).
+print(f"Correlation(Base_Score, FinalRank):      {base_corr:.3f}")
+print(f"Correlation(SearchBuilder, FinalRank):   {sb_corr:.3f}")
+print(f"Correlation(RetrievalDepth, FinalRank):  {ret_corr:.3f}")
+print(f"Correlation(RankingDepth, FinalRank):    {rd_corr:.3f}")
+
+print("\n" + "="*80)
+print("POTENTIAL EMBEDDING FALSE NEGATIVES (Top 20)")
+print("="*80)
+print(f"Top 20 Median Base Score: {t20_median_base:.3f}\n")
+
+false_negatives = []
+for row in top20.iter_rows(named=True):
+    if row['feat_search_builder'] >= 0.90 and row['feat_ranking_depth'] >= 0.90 and row['Base_Score'] < t20_median_base:
+        false_negatives.append(row['candidate_id'])
+
+def get_simulated_rank(cid, target_base):
+    df_sim = df_ranked.clone()
+    df_sim = df_sim.with_columns(
+        pl.when(pl.col("candidate_id") == cid).then(target_base).otherwise(pl.col("Base_Score")).alias("Base_Score")
+    )
+    df_sim = df_sim.with_columns(
+        (pl.col("Base_Score") * pl.col("Technical_Multiplier") * pl.col("feat_verified_search_skill") * pl.col("Trajectory_Multiplier") * pl.col("Behavioral_Multiplier") * pl.col("Persona_Penalty") * pl.col("Honeypot_Decay")).alias("Final_Score")
+    )
+    df_sim_ranked = df_sim.sort(["Final_Score","candidate_id"], descending=[True,False]).with_row_index("sim_rank")
+    return df_sim_ranked.filter(pl.col("candidate_id") == cid)['sim_rank'][0] + 1
+
+for cid in false_negatives:
+    r = df_ranked.filter(pl.col("candidate_id") == cid)['rank'][0] + 1
+    new_r = get_simulated_rank(cid, t20_median_base)
+    print(f"Candidate: {cid} (Current Rank: {r})")
+    print(f"  If Base_Score replaced with Top20 Median -> Rank {new_r}")
+
+print("\nDone.")
