@@ -87,7 +87,7 @@ def main():
             0.20 * pl.col("feat_ranking_depth") + 
             0.15 * pl.col("feat_retrieval_depth") +
             0.15 * pl.col("feat_evaluation_rigor") +
-            0.15 * pl.col("feat_builder_score")
+            0.35 * pl.col("feat_builder_score")
         ),
         Trajectory_Multiplier = pl.col("feat_product_exposure") + pl.col("feat_trajectory_transition"),
         Behavioral_Multiplier = pl.col("feat_availability_score") + pl.col("feat_saved_boost") + pl.col("feat_search_appearance_boost"),
