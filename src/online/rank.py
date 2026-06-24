@@ -78,7 +78,15 @@ def main():
     ])
     
     df_pool = df_pool.with_columns(
-        Base_Score = (0.55 * pl.col("sim_recent")) + (0.30 * pl.col("sim_last_two")) + (0.15 * pl.col("sim_full"))
+        Base_Score = (0.55 * pl.col("sim_recent")) + (0.30 * pl.col("sim_last_two")) + (0.15 * pl.col("sim_full")),
+        feat_search_builder = ((0.4 * pl.col("feat_builder_score") + 0.3 * pl.col("feat_ranking_depth") + 0.3 * pl.col("feat_retrieval_depth")).clip(0.0, 1.0))
+    )
+    
+    df_pool = df_pool.with_columns(
+        exempt_contra = pl.when(
+            (pl.col("feat_search_builder") >= 0.80) | 
+            ((pl.col("feat_ranking_depth") >= 0.80) & (pl.col("feat_retrieval_depth") >= 0.80))
+        ).then(pl.col("contradiction_score") * 0.25).otherwise(pl.col("contradiction_score"))
     )
     
     df_pool = df_pool.with_columns(
@@ -89,15 +97,14 @@ def main():
             0.15 * pl.col("feat_evaluation_rigor") +
             0.35 * pl.col("feat_builder_score")
         ),
-        Trajectory_Multiplier = pl.col("feat_product_exposure") + pl.col("feat_trajectory_transition"),
-        Behavioral_Multiplier = pl.col("feat_availability_score") + pl.col("feat_saved_boost") + pl.col("feat_search_appearance_boost"),
+        Trajectory_Multiplier = 0.50 + 0.20 * pl.col("feat_builder_score") + 0.20 * pl.col("feat_ranking_depth") + 0.10 * pl.col("feat_retrieval_depth"),
+        Behavioral_Multiplier = 1.0 + (pl.col("feat_availability_score") + pl.col("feat_saved_boost") + pl.col("feat_search_appearance_boost") - 1.0) * 0.25,
         Persona_Penalty = pl.col("feat_wrapper_ai_only") * pl.col("feat_architect_no_coding"),
-        Honeypot_Decay = pl.col("contradiction_score").map_elements(lambda x: math.exp(-x), return_dtype=pl.Float64)
+        Honeypot_Decay = pl.col("exempt_contra").map_elements(lambda x: math.exp(-0.10 * x), return_dtype=pl.Float64)
     )
     
     df_pool = df_pool.with_columns(
-        Final_Score = (
-            pl.col("Base_Score") *
+        Core_Mult = (
             pl.col("Technical_Multiplier") *
             pl.col("feat_verified_search_skill") *
             pl.col("Trajectory_Multiplier") *
@@ -105,6 +112,10 @@ def main():
             pl.col("Persona_Penalty") *
             pl.col("Honeypot_Decay")
         )
+    )
+    
+    df_pool = df_pool.with_columns(
+        Final_Score = pl.col("Core_Mult") * (1.0 + 0.20 * pl.col("Base_Score"))
     )
     
     df_top = df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(100)
@@ -131,11 +142,13 @@ def main():
     df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(200).write_parquet(debug_path)
     logging.info(f"Saved debug output to {debug_path}")
 
-    # Export Top 20 and Top 100 CSVs for the audit
+    # Export CSVs for the audit
     top20_path = artifacts_dir.parent / 'top20.csv'
     top100_path = artifacts_dir.parent / 'top100.csv'
+    top500_path = artifacts_dir.parent / 'top500.csv'
     df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(20).write_csv(top20_path)
     df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(100).write_csv(top100_path)
+    df_pool.sort(["Final_Score", "candidate_id"], descending=[True, False]).head(500).write_csv(top500_path)
 
 if __name__ == "__main__":
     main()

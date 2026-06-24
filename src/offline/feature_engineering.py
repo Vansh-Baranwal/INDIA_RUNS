@@ -92,10 +92,6 @@ def compute_contradiction_score(row: dict) -> float:
     yoe = row.get('years_of_experience', 0)
     dur_total = row.get('total_duration_months', 0)
     grad_year = row.get('grad_year', 0)
-    
-    if dur_total > (yoe * 12) * 1.2:
-        score += 5.0
-        
     if grad_year > 0:
         if (2026 - grad_year) < yoe - 2:
             score += 5.0
