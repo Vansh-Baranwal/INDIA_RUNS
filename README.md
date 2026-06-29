@@ -1,4 +1,4 @@
-# India Runs: Search Quality Ranking Pipeline
+# Search Quality Ranking Pipeline
 
 This repository contains the end-to-end ranking pipeline for identifying Principal Search Quality Engineers for Redrob. It leverages a combination of structured feature engineering, semantic density checks, and FAISS-based vector search to mathematically rank candidates based on their technical depth, algorithmic purity, and search trajectory.
 
