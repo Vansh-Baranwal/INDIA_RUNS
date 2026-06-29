@@ -91,3 +91,6 @@ To run the entire pipeline end-to-end, execute the provided PowerShell script:
         ├── rank.py
         └── reasoning.py
 ```
+
+## License
+This project is licensed under the MIT License. See the LICENSE file for details.
